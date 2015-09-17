@@ -2,11 +2,14 @@
 #
 ######################################################################
 #
-#  privoxy-blocklist.sh @ VERSION 141512-1 
+#  privoxy-blocklist.sh @ VERSION 152103-1 
 #
 #  Modified for DD-WRT by: 
 #  Simon Sanladerer <simon-at-sanladerer.com>
 #  Tested on_ DD-WRT Build BS 25408+ and Kong 23900+
+#
+#  Additional modifications by:
+#  James White <james-at-jmwhite.co.uk>
 #
 #  Based on Original Script by:
 #
@@ -16,7 +19,7 @@
 #
 ######################################################################
 #
-#  Sumary: 
+#  Summary: 
 #  This script downloads, converts and installs
 #  AdblockPlus lists into Privoxy
 #
@@ -49,13 +52,39 @@
 #
 ######################################################################
 
-# privoxy config dir (default: /etc/privoxy/)
-CONFDIR=/jffs/etc/privoxy
-# directory for temporary files
-TMPDIR=/jffs/tmp/privoxy-blocklist
-TMPNAME=$(basename "${0}")
+# URL of each AdBlock list to download and convert
+# Each list must appear on a new line with a backslash denoting a new line
+# You can find AdBlock lists at: https://adblockplus.org/en/subscriptions
+ADBLOCKLISTS=" \
+https://easylist-downloads.adblockplus.org/easylist.txt \
+https://easylist-downloads.adblockplus.org/antiadblockfilters.txt"
 
-mkdir ${TMPDIR}
+# If you want to store the custom files on /opt, set this to 1
+OPTWARE=0
+if [ ${OPTWARE} -eq 1 ] ; then
+	ROOTDIR="/opt"
+else
+	ROOTDIR="/jffs"
+fi
+
+# Check if the specified ROOTDIR is actually mounted and available
+MOUNTCHECK=$(mount | grep -c " on ${ROOTDIR} ")
+
+if [ "${MOUNTCHECK}" -eq 0 ] ; then
+	echo "${ROOTDIR} is not mounted. Please confirm the partition is mounted before continuing"
+	exit 1
+fi
+
+# Privoxy config dir (default: /jffs/etc/privoxy/)
+CONFDIR="${ROOTDIR}/etc/privoxy"
+# Script tmp dir
+TMPDIR="${ROOTDIR}/tmp/privoxy-blocklist"
+TMPNAME=$(basename "${0}")
+# Create directory paths if they don't exist
+mkdir -p ${CONFDIR}
+mkdir -p ${TMPDIR}
+# Debug mode, set to 1 to enable
+DBG=0
 
 ######################################################################
 #
@@ -65,30 +94,29 @@ mkdir ${TMPDIR}
 
 usage()
 {
-	echo "${TMPNAME} is a script to convert AdBlockPlus-lists into Privoxy-lists and install them."
+	echo "${TMPNAME} is a script to convert AdBlock Plus lists into Privoxy-lists and install them."
 	echo " "
 	echo "Options:"
 	echo "      -h:    Show this help."
 	echo "      -q:    Don't give any output."
 	echo "      -v 1:  Enable verbosity 1. Show a little bit more output."
 	echo "      -v 2:  Enable verbosity 2. Show a lot more output."
-	echo "      -v 3:  Enable verbosity 3. Show all possible output and don't delete temporary files.(For debugging only!!)"
+	echo "      -v 3:  Enable verbosity 3. Show all possible output and don't delete temporary files. (For debugging only!!)"
 	echo "      -r:    Remove all lists build by this script."
 }
 
 # check for dependencies
-for dep in $'/usr/sbin/privoxy' ; do
-  if ! [ -e ${dep} ]
-  then
-    echo "The command ${dep} can't be found. Please install the package providing ${dep} and run $0 again. Exit" >&2
-    exit 1
-  fi
+DEPENDENCIES="curl grep privoxy sed"
+for COMMAND in ${DEPENDENCIES}
+do
+	type -p "${COMMAND}" &>/dev/null && continue || {
+		echo "The following dependency is missing: (${COMMAND})."
+		exit 1
+	}
 done
 
 # check whether an instance is already running
-[ -e "${TMPDIR}/${TMPNAME}.lock" ] && echo "An Instance of ${TMPNAME} is already running. Exit" && exit
-
-DBG=0
+[ -e "${TMPDIR}/${TMPNAME}.lock" ] && echo "An instance of ${TMPNAME} is already running. Exit" && exit
 
 debug()
 {
@@ -100,10 +128,10 @@ main()
 	cpoptions=""
 	[ ${DBG} -gt 0 ] && cpoptions="-v"
 
-	for url in "https://easylist-downloads.adblockplus.org/easylist.txt" "https://easylist-downloads.adblockplus.org/easylistgermany.txt" "https://easylist-downloads.adblockplus.org/malwaredomains_full.txt"; do
+	for url in ${ADBLOCKLISTS}
+	do
 		debug "Processing ${url} ...\n" 0
-		file="${TMPDIR}/$(basename ${url})"
-		filename=$(basename "${url}")
+		file="${TMPDIR}/$(basename "${url}")"
 		actionfile=${file%\.*}.script.action
 		filterfile=${file%\.*}.script.filter
 		list=$(basename "${file%\.*}")
@@ -111,108 +139,24 @@ main()
 		# download list
 		debug "Downloading ${url} ..." 0
 		curl -s -k "${url}" > "${file}"
-		#curl -k -o ${file} ${url} >${TMPDIR}/wget-${filename//\//#}.log 2>&1
-		#debug "$(cat ${TMPDIR}/wget-${filename//\//#}.log)" 2
 		debug ".. downloading done." 0
-		[ "$(grep -E '^\[Adblock.*\]$' "${file}")" == "" ] && echo "The list recieved from ${url} isn't an AdblockPlus list. Skipped" && continue
+		[ "$(grep -E '^\[Adblock.*\]$' "${file}")" == "" ] && echo "The list received from ${url} isn't an AdblockPlus list. Skipped" && continue
 	
-		# convert AdblockPlus list to Privoxy list
+		# convert Adblock Plus list to Privoxy list
 		# blacklist of urls
 		debug "Creating actionfile for ${list} ..." 1
 		echo -e "{ +block{${list}} }" > "${actionfile}"
-		
-		#sed '/^!.*/d;1,1 d;/^@@.*/d;/\$.*/d;/#/d;s/\./\./g;s/\?/\\?/g;s/\*/.*/g;s/(/\\(/g;s/)/\\)/g;s/\[/\\[/g;s/\]/\\]/g;s/\^/[\/\&:\?=_]/g;s/^||/\./g;s/^|/^/g;s/|$/\$/g;/|/d' ${file} >> ${actionfile}
-		sed \
-			-e '/^!.*/d;' \
-			-e 's/^\|\|\(.*\)\^\(.*\)$/\.\1\2/g;' \
-			-e '1,1 d;' \
-			-e '/^@@.*/d;' \
-			-e '/\$.*/d;' \
-			-e '/#/d;' \
-			-e 's/\./\./g;' \
-			-e 's/\?/\\?/g;' \
-			-e 's/\*/\.*/g;' \
-			-e 's/(/\\(/g;' \
-			-e 's/)/\\)/g;' \
-			-e 's/\[/\\[/g;' \
-			-e 's/\]/\\]/g;' \
-			-e 's/\^/[\/\&:\?=_]/g;' \
-			-e 's/^||/\./g;' \
-			-e 's/^|/^/g;' \
-			-e 's/|$/\$/g;' \
-			-e '/|/d' \
-		"${file}" >> "${actionfile}"
+		sed '/^!.*/d;1,1 d;/^@@.*/d;/\$.*/d;/#/d;s/\./\\./g;s/\?/\\?/g;s/\*/.*/g;s/(/\\(/g;s/)/\\)/g;s/\[/\\[/g;s/\]/\\]/g;s/\^/[\/\&:\?=_]/g;s/^||/\./g;s/^|/^/g;s/|$/\$/g;/|/d' ${file} >> ${actionfile}
 
 		debug "... creating filterfile for ${list} ..." 1
 		echo "FILTER: ${list} Tag filter of ${list}" > "${filterfile}"
-
-		# set filter for html elements
-		#sed '/^#/!d;s/^##//g;s/^#\(.*\)\[.*\]\[.*\]*/s|<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>||g/g;s/^#\(.*\)/s|<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>||g/g;s/^\.\(.*\)/s|<([a-zA-Z0-9]+)\\s+.*class=.?\1.*>.*<\/\\1>||g/g;s/^a\[\(.*\)\]/s|<a.*\1.*>.*<\/a>||g/g;s/^\([a-zA-Z0-9]*\)\.\(.*\)\[.*\]\[.*\]*/s|<\1.*class=.?\2.*>.*<\/\1>||g/g;s/^\([a-zA-Z0-9]*\)#\(.*\):.*[:[^:]]*[^:]*/s|<\1.*id=.?\2.*>.*<\/\1>||g/g;s/^\([a-zA-Z0-9]*\)#\(.*\)/s|<\1.*id=.?\2.*>.*<\/\1>||g/g;s/^\[\([a-zA-Z]*\).=\(.*\)\]/s|\1^=\2>||g/g;s/\^/[\/\&:\?=_]/g;s/\.\([a-zA-Z0-9]\)/\\.\1/g' ${file} >> ${filterfile}
-		sed \
-			-e '/^#/!d;' \
-			-e 's/^##//g;' \
-			-e 's/^#\(.*\)\[.*\]\[.*\]*/s|<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>||g/g;' \
-			-e 's/^#\(.*\)/s|<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>||g/g;' \
-			-e 's/^\.\(.*\)/s|<([a-zA-Z0-9]+)\\s+.*class=.?\1.*>.*<\/\\1>||g/g;' \
-			-e 's/^a\[\(.*\)\]/s|<a.*\1.*>.*<\/a>||g/g;' \
-			-e 's/^\([a-zA-Z0-9]*\)\.\(.*\)\[.*\]\[.*\]*/s|<\1.*class=.?\2.*>.*<\/\1>||g/g;' \
-			-e 's/^\([a-zA-Z0-9]*\)#\(.*\):.*[:[^:]]*[^:]*/s|<\1.*id=.?\2.*>.*<\/\1>||g/g;' \
-			-e 's/^\([a-zA-Z0-9]*\)#\(.*\)/s|<\1.*id=.?\2.*>.*<\/\1>||g/g;s/^\[\([a-zA-Z]*\).=\(.*\)\]/s|\1^=\2>||g/g;' \
-			-e 's/\^/[\/\&:\?=_]/g;' \
-			-e 's/\.\([a-zA-Z0-9]\)/\\.\1/g' \
-		"${file}" >> "${filterfile}"
-
+		# set filter for HTML elements
+		sed '/^#/!d;s/^##//g;s/^#\(.*\)\[.*\]\[.*\]*/s@<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>@@g/g;s/^#\(.*\)/s@<([a-zA-Z0-9]+)\\s+.*id=.?\1.*>.*<\/\\1>@@g/g;s/^\.\(.*\)/s@<([a-zA-Z0-9]+)\\s+.*class=.?\1.*>.*<\/\\1>@@g/g;s/^a\[\(.*\)\]/s@<a.*\1.*>.*<\/a>@@g/g;s/^\([a-zA-Z0-9]*\)\.\(.*\)\[.*\]\[.*\]*/s@<\1.*class=.?\2.*>.*<\/\1>@@g/g;s/^\([a-zA-Z0-9]*\)#\(.*\):.*[:[^:]]*[^:]*/s@<\1.*id=.?\2.*>.*<\/\1>@@g/g;s/^\([a-zA-Z0-9]*\)#\(.*\)/s@<\1.*id=.?\2.*>.*<\/\1>@@g/g;s/^\[\([a-zA-Z]*\).=\(.*\)\]/s@\1^=\2>@@g/g;s/\^/[\/\&:\?=_]/g;s/\.\([a-zA-Z0-9]\)/\\.\1/g' ${file} >> ${filterfile}
 		debug "... filterfile created - adding filterfile to actionfile ..." 1
 		echo "{ +filter{${list}} }" >> "${actionfile}"
 		echo "*" >> "${actionfile}"
 		debug "... filterfile added ..." 1
 		debug "... creating and adding whitlist for urls ..." 1
-
-
-		# whitelist of urls
-		#echo "{ -block }" >> ${actionfile}
-		#sed \ 
-		# 	-e '/^@@.*/!d;' \
-		#	-e 's/^@@//g;' \
-		#	-e '/\$.*/d;' \
-		#	-e '/#/d; '\
-		#	-e 's/\?/\\?/g;' \
-		#	-e 's/\*/.*/g;' \
-		#	-e 's/(/\\(/g;' \
-		#	-e 's/)/\\)/g;' \
-		#	-e 's/\[/\\[/g;' \
-		#	-e 's/\]/\\]/g;' \
-		#	-e 's/\^/[\/\&:\?=_]/g;' \
-		#	-e 's/^||/\./g;' \
-		#	-e 's/^|/^/g;' \
-		#	-e 's/|$/\$/g;' \
-		#	-e '/|/d' \
-		#"${file}" >> "${actionfile}"
-		#debug "... created and added whitelist - creating and adding image handler ..." 1
-		
-
-		# whitelist of image urls
-		#echo "{ -block +handle-as-image }" >> ${actionfile}
-		#sed \
-		#	-e '/^@@.*/!d;' \
-		#	-e 's/^@@//g'; \
-		#	-e '/\$.*image.*/!d;' \
-		#	-e 's/\$.*image.*//g;' \
-		#	-e '/#/d;' \
-		#	-e 's/\?/\\?/g;' \
-		#	-e 's/\*/.*/g;' \
-		#	-e 's/(/\\(/g;' \
-		#	-e 's/)/\\)/g;' \
-		#	-e 's/\[/\\[/g;' \
-		#	-e 's/\]/\\]/g;' \
-		#	-e 's/\^/[\/\&:\?=_]/g;' \
-		#	-e 's/^||/\./g;' \
-		#	-e 's/^|/^/g;' \
-		#	-e 's/|$/\$/g;' \
-		#	-e '/|/d' \
-		#"${file}" >> "${actionfile}"
-		#debug "... created and added image handler ..." 1
-		#debug "... created actionfile for ${list}." 1
 	
 		# install Privoxy actionsfile
 		cp ${cpoptions} "${actionfile}" "${CONFDIR}"
@@ -241,8 +185,7 @@ main()
 	done
 }
 
-# create temporary directory and lock file
-mkdir -p ${TMPDIR}
+# create temporary lock file
 touch "${TMPDIR}/${TMPNAME}.lock"
 
 # set command to be run on exit
@@ -269,7 +212,7 @@ do
 			rm -rf ${CONFDIR}/*.script.{action,filter} && \
 			sed '/^actionsfile .*\.script\.action$/d;/^filterfile .*\.script\.filter$/d' -i /tmp/privoxy.conf && \
 			echo "Lists removed." && exit 0
-			echo -e "An error occured while removing the lists.\nPlease have a look into ${CONFDIR} whether there are .script.* files and search for *.script.* in ${CONFDIR}/config."
+			echo -e "An error occurred while removing the lists.\nPlease have a look into ${CONFDIR} whether there are .script.* files and search for *.script.* in ${CONFDIR}/config."
 			exit 1
 			;;
 		":")
@@ -279,7 +222,7 @@ do
 	esac
 done
 
-debug "URL-List: ${URLS}\nPrivoxy-Configdir: ${CONFDIR}\nTemporary directory: ${TMPDIR}" 2
+debug "URL-List: ${ADBLOCKLISTS}\nPrivoxy-Configdir: ${CONFDIR}\nTemporary directory: ${TMPDIR}" 2
 main
 
 # restore default exit command
